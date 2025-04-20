@@ -1,0 +1,12 @@
+[project]
+name = "pipifax_lengthed_generator"
+version = "0.0.1"
+description = "Easily make a generator function provide a len(). Useful for use with tqdm."
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "GPL-3.0-or-later	"
+license-files = ["LICEN[CS]E*"]
+dependencies = []

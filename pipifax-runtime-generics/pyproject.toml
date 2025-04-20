@@ -1,0 +1,12 @@
+[project]
+name = "pipifax_runtime_generics"
+version = "1.0.0"
+description = "Generics with runtime generic arg access."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "GPL-3.0-or-later	"
+license-files = ["LICEN[CS]E*"]
