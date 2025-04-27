@@ -1,68 +1,17 @@
-import abc
 import dataclasses
-import json
 import pathlib
 import typing
 
-from . import saferw, dyn_codegen
-from .json_serialization import (
-    _compile_json_serializer, _compile_json_deserializer, JsonType,
-    serialize_json, deserialize_json
-)
+from . import saferw, type_serializer, json_serialization
 
 
-class Serializable(abc.ABC):
+class Serializable(typing.Protocol):
     def serialize(self) -> bytes:
-        ...
+        pass
 
     @classmethod
     def deserialize(cls, data: bytes) -> typing.Self:
-        ...
-
-
-class JsonSerializable(Serializable, abc.ABC):
-    def serialize_json(self) -> JsonType:
-        ...
-
-    @classmethod
-    def deserialize_json(cls, data: JsonType) -> typing.Self:
-        ...
-
-    def serialize(self) -> bytes:
-        return json.dumps(self.serialize_json()).encode("utf-8")
-
-    @classmethod
-    def deserialize(cls, data: bytes) -> typing.Self:
-        return cls.deserialize_json(json.loads(data.decode("utf-8")))
-
-
-class HasSerializationCodegen(JsonSerializable, abc.ABC):
-    @classmethod
-    @abc.abstractmethod
-    def _compile_json_serializer(
-        cls,
-        in_var: str,
-        out_var: str,
-        codegen: dyn_codegen.CodeGenerator
-    ) -> None:
-        ...
-
-    @classmethod
-    @abc.abstractmethod
-    def _compile_json_deserializer(
-        cls,
-        in_var: str,
-        out_var: str,
-        codegen: dyn_codegen.CodeGenerator
-    ) -> None:
-        ...
-
-    def serialize_json(self) -> JsonType:
-        return serialize_json(self, self.__class__)
-
-    @classmethod
-    def deserialize_json(cls, data: JsonType) -> typing.Self:
-        return deserialize_json(data, cls)
+        pass
 
 
 # Type hinting this correctly is impossible due to a lack of intersection types
@@ -126,7 +75,7 @@ class HasSerializationCodegen(JsonSerializable, abc.ABC):
 #     return decorator
 
 
-class SimpleSerializable(HasSerializationCodegen):
+class SimpleSerializable(json_serialization.HasJsonSerializationCodegenSerializableMixin):
     def __deserialize_init__(self):
         pass
 
@@ -158,44 +107,44 @@ class SimpleSerializable(HasSerializationCodegen):
         cls,
         in_var: str,
         out_var: str,
-        codegen: dyn_codegen.CodeGenerator
+        serializer: type_serializer.SerializerCodegen
     ) -> None:
         out = []
         fields = cls._get_serialize_fields()
 
         for field_name, field_type in fields.items():
-            tmp = codegen.get_var()
+            tmp = serializer.codegen.get_var()
             out.append(tmp)
 
-            codegen.assign(tmp, f"{in_var}.{field_name}")
+            serializer.codegen.assign(tmp, f"{in_var}.{field_name}")
 
-            _compile_json_serializer(field_type, tmp, tmp, codegen)
+            serializer.any(field_type, tmp, tmp)
 
-        codegen.assign(out_var, f"({', '.join(out)},)")
+        serializer.codegen.assign(out_var, f"({', '.join(out)},)")
 
     @classmethod
     def _compile_json_deserializer(
         cls,
         in_var: str,
         out_var: str,
-        codegen: dyn_codegen.CodeGenerator
+        deserializer: type_serializer.DeserializerCodegen
     ) -> None:
-        cls_var = codegen.get_const(cls)
+        cls_var = deserializer.codegen.get_const(cls)
 
         fields = cls._get_serialize_fields()
 
-        tmp = codegen.get_var()
-        codegen.assign(tmp, f"{cls_var}.__new__({cls_var})")
+        tmp = deserializer.codegen.get_var()
+        deserializer.codegen.assign(tmp, f"{cls_var}.__new__({cls_var})")
 
         for i, (field_name, field_type) in enumerate(fields.items()):
-            tmp2 = codegen.get_var()
-            _compile_json_deserializer(field_type, f"{in_var}[{i}]", tmp2, codegen)
+            tmp2 = deserializer.codegen.get_var()
+            deserializer.any(field_type, f"{in_var}[{i}]", tmp2)
 
-            codegen.literal(f"object.__setattr__({tmp}, {field_name!r}, {tmp2})")
+            deserializer.codegen.literal(f"object.__setattr__({tmp}, {field_name!r}, {tmp2})")
 
-        codegen.literal(f"{tmp}.__deserialize_init__()")
+        deserializer.codegen.literal(f"{tmp}.__deserialize_init__()")
 
-        codegen.assign(out_var, tmp)
+        deserializer.codegen.assign(out_var, tmp)
 
 
 class DataStore[T: Serializable]:

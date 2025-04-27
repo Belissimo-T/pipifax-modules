@@ -49,10 +49,12 @@ class _TracebackSourceContextManager:
         else:
             lines = self.src.splitlines()
 
-            exc_val.add_note(
-                "Exception occurred in dynamically generated code:\n"
-                f"{lines[exc_tb.tb_next.tb_lineno - 1]}\n"
-            )
+            if exc_tb.tb_next is not None:
+                exc_val.add_note(
+                    "Exception occurred in dynamically generated code:\n"
+                    f"{lines[exc_tb.tb_next.tb_lineno - 1]}\n\n"
+                    f"Full source:\n{self.src}"
+                )
         return False
 
 
@@ -84,6 +86,7 @@ class CodeGenerator:
         self.current_indent += 1
 
     def dedent(self):
+        self.literal("...")
         self.current_indent -= 1
 
     def add_statement(self, statement: Statement):
@@ -123,6 +126,7 @@ class CodeGenerator:
                 blocks.append((indent, []))
 
             blocks[-1][1].append(statement)
+            current_indent = indent
 
         return blocks
 
@@ -143,6 +147,7 @@ class CodeGenerator:
             with _TracebackSourceContextManager(src, name):
                 scope = {in_var: data}
                 exec(code, self.consts, scope)
+
                 return scope[out_var]
 
         return func
