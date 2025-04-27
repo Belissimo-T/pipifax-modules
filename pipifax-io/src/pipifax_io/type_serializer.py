@@ -166,11 +166,11 @@ class DeserializerCodegen(abc.ABC):
         class_var = self.codegen.get_const(class_)
 
         elem_i, elem_var = self.codegen.get_vars(2)
-        self.codegen.assign(out_var, f"{class_var}({in_var})")
         self.codegen.literal(f"for {elem_i}, {elem_var} in enumerate({in_var}):")
         self.codegen.indent()
         self.any(element_type, elem_var, elem_var)
-        self.codegen.assign(f"{out_var}[{elem_i}]", elem_var)
+        self.codegen.assign(f"{in_var}[{elem_i}]", elem_var)
+        self.codegen.assign(out_var, f"{class_var}({in_var})")
         self.codegen.dedent()
 
     def union(self, args: tuple[TypeHint, ...], in_var: str, out_var: str):

@@ -12,6 +12,7 @@ from . import type_serializer
 try:
     import pydantic
 except ImportError:
+    pydantic = None
     pass
 
 _SimpleJson = typing.Union[str, int, float, bool, None]
@@ -206,13 +207,13 @@ class JsonSerializerCodegen(type_serializer.SerializerCodegen):
             base_type._compile_json_serializer(in_var, out_var, self)
             return
 
-        # if pydantic is not None:
-        #     if issubclass(base_class, pydantic.BaseModel):
-        #         codegen.assign(out_var, f"{in_var}.model_dump(mode='json')")
-        #         return
-        #     elif issubclass(base_class, type(pydantic.BaseModel)):
-        #         codegen.assign(out_var, f"{in_var}.model_json_schema(mode='validation')")
-        #         return
+        if pydantic is not None:
+            if issubclass(base_type, pydantic.BaseModel):
+                self.codegen.assign(out_var, f"{in_var}.model_dump(mode='json')")
+                return
+            elif issubclass(base_type, type(pydantic.BaseModel)):
+                self.codegen.assign(out_var, f"{in_var}.model_json_schema(mode='validation')")
+                return
 
         super().type_(type_, base_type, args, in_var, out_var)
 
@@ -303,13 +304,11 @@ class JsonDeserializerCodegen(type_serializer.DeserializerCodegen):
             base_type._compile_json_deserializer(in_var, out_var, self)
             return
 
-        # if pydantic is not None:
-        #     if issubclass(base_class, pydantic.BaseModel):
-        #         codegen.assign(out_var, f"{in_var}.model_dump(mode='json')")
-        #         return
-        #     elif issubclass(base_class, type(pydantic.BaseModel)):
-        #         codegen.assign(out_var, f"{in_var}.model_json_schema(mode='validation')")
-        #         return
+        if pydantic is not None:
+            if issubclass(base_type, pydantic.BaseModel):
+                base_type_var = self.codegen.get_const(base_type)
+                self.codegen.assign(out_var, f"{base_type_var}.model_validate({in_var})")
+                return
 
         super().type_(type_, base_type, args, in_var, out_var)
 

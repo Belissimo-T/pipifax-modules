@@ -10,8 +10,11 @@ import types
 import typing
 
 import bson
+
 from .saferw import safe_read_bytes, safe_write_bytes
-from .json_serialization import serialize_json, deserialize_json, JsonSerializableValue
+from .json_serialization import (
+    serialize_json, JsonSerializableValue, compile_json_serializer, compile_json_deserializer
+)
 
 
 class DeleteCachedFile(Exception):
@@ -206,12 +209,14 @@ def cache_auto[** P, R, S: JsonSerializableValue](
             )
             ext = ""
         else:
+            json_serialize_func = compile_json_serializer(serialize_type_)
+            json_deserialize_func = compile_json_deserializer(serialize_type_)
             serialize_ = (
-                (lambda x: json.dumps(serialize_json(x, serialize_type_)).encode("utf-8"))
+                (lambda x: json.dumps(json_serialize_func(x)).encode("utf-8"))
                 if serialize is None else serialize
             )
             deserialize_ = (
-                (lambda x: deserialize_json(json.loads(x.decode("utf-8")), serialize_type_))
+                (lambda x: json_deserialize_func(json.loads(x.decode("utf-8"))))
                 if deserialize is None else deserialize
             )
             ext = ".json"
