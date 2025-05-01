@@ -114,13 +114,19 @@ class SimpleSerializable(json_serialization.HasJsonSerializationCodegenSerializa
 
         for field_name, field_type in fields.items():
             tmp = serializer.codegen.get_var()
-            out.append(tmp)
+            out.append((field_name, tmp))
 
             serializer.codegen.assign(tmp, f"{in_var}.{field_name}")
 
             serializer.any(field_type, tmp, tmp)
 
-        serializer.codegen.assign(out_var, f"({', '.join(out)},)")
+        serializer.codegen.assign(out_var, "{" + ", ".join([f"{name!r}: {v}" for name, v in out]) + "}")
+
+        serializer.any(
+            dict[str, json_serialization.JsonType],
+            in_var=out_var,
+            out_var=out_var,
+        )
 
     @classmethod
     def _compile_json_deserializer(
@@ -136,9 +142,9 @@ class SimpleSerializable(json_serialization.HasJsonSerializationCodegenSerializa
         tmp = deserializer.codegen.get_var()
         deserializer.codegen.assign(tmp, f"{cls_var}.__new__({cls_var})")
 
-        for i, (field_name, field_type) in enumerate(fields.items()):
+        for field_name, field_type in fields.items():
             tmp2 = deserializer.codegen.get_var()
-            deserializer.any(field_type, f"{in_var}[{i}]", tmp2)
+            deserializer.any(field_type, f"{in_var}[{field_name!r}]", tmp2)
 
             deserializer.codegen.literal(f"object.__setattr__({tmp}, {field_name!r}, {tmp2})")
 
