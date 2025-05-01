@@ -9,6 +9,7 @@ scoring_min_tries = 5
 scoring_untested_score = 1
 score_random_choice_exponent = 10
 rejudge_interval = 2_160 # 6 hours
+min_yield_delay = 0.5  # s
 
 [proxy-provider]
 cache_file = "proxies9.json"

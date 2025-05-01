@@ -43,7 +43,7 @@ class BasicAuth(pipifax_io.serializable.SimpleSerializable):
 
 @dataclasses.dataclass
 class ProxyData(pipifax_io.serializable.SimpleSerializable):
-    __exclude_fields__: typing.ClassVar[set[str]] = {"_currently_in_use"}
+    __exclude_fields__: typing.ClassVar[set[str]] = {"_currently_in_use", "_last_yielded"}
 
     auth: BasicAuth | None = None
     score5: float = 1
@@ -60,7 +60,7 @@ class ProxyData(pipifax_io.serializable.SimpleSerializable):
     last_judged: datetime.datetime = datetime.datetime.min
     anonymity_level: str | None = None
 
-    # _last_outputted: datetime.datetime | None = None
+    _last_yielded: datetime.datetime | None = None
     _currently_in_use: bool = False
 
     def to_proxy(self, scheme: str, url: str, port: int) -> "Proxy":
@@ -160,6 +160,7 @@ class ProxyProvider:
         self.shard_length = 200
         self.scoring_min_tries = 3
         self.scoring_untested_score = 1
+        self.min_yield_delay = 0.5
 
         self.do_rechoose_shard = False
         self.executor = concurrent.futures.ThreadPoolExecutor()
@@ -373,6 +374,16 @@ class ProxyProvider:
                     if proxy_data._currently_in_use:
                         continue
 
+                    now = datetime.datetime.now()
+
+                    if (
+                        proxy_data._last_yielded is not None
+                        and (now - proxy_data._last_yielded).total_seconds() < self.min_yield_delay
+                    ):
+                        continue
+
+                    proxy_data._last_yielded = now
+
                     do_exclude_proxy = False
 
                     do_exclude_proxy |= anonymity_level == "elite" and proxy_data.anonymity_level != "elite"
@@ -384,8 +395,8 @@ class ProxyProvider:
 
                     needs_rotate = (
                         rotation_rate is not None
-                        and (datetime.datetime.now() - proxy_data.last_used.get(reason,
-                                                                                datetime.datetime.min)).total_seconds() < rotation_rate
+                        and (now - proxy_data.last_used.get(reason,
+                                                            datetime.datetime.min)).total_seconds() < rotation_rate
                     )
                     do_exclude_proxy |= needs_rotate
 
@@ -456,7 +467,7 @@ class ProxyProvider:
             return
 
         try:
-            self._logger.info(" * Rejudging proxies.")
+            self._logger.info("Rejudging proxies.")
             now = datetime.datetime.now()
             self.judge_mgr.create_judges()
 
@@ -467,7 +478,7 @@ class ProxyProvider:
                     continue
 
                 if (now - proxy.last_judged).total_seconds() > self.rejudge_interval:
-                    self._logger.debug(f" => Rejudging {p_addr}.")
+                    # self._logger.debug(f" => Rejudging {p_addr}.")
                     self.rejudge_executor.submit(self._log_error(self._rejudge), p_addr, proxy)
         finally:
             self._rejudge_lock.release()
