@@ -11,5 +11,5 @@ license-files = ["LICEN[CS]E*"]
 
 dependencies = [
     "urllib3[socks]",
-    "pipifax_io"
+    "pipifax-io@git+https://github.com/Belissimo-T/pipifax-modules.git/#subdirectory=pipifax-io"
 ]
