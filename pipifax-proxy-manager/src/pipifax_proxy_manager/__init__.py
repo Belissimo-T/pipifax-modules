@@ -593,6 +593,7 @@ class ProxiedSession:
         preferred_proxy: Proxy | None = None,
         rotation_rate: float | None = None,
         blocked_grace: float | None = 60 * 5,
+        reason: str | None = None,
     ) -> T:
         curl_kwargs = dict(timeout=5) | curl_kwargs
         t0 = time.perf_counter()
@@ -600,7 +601,7 @@ class ProxiedSession:
         preferred_proxy_it = itertools.repeat(preferred_proxy, 3) if preferred_proxy is not None else []
 
         endpoint = urllib3.util.url.parse_url(curl_kwargs["url"])
-        reason = f"{endpoint.scheme}://{endpoint.netloc}{endpoint.path or ''}"
+        reason = reason if reason is not None else f"{endpoint.scheme}://{endpoint.netloc}{endpoint.path or ''}"
 
         proxy_it = self.proxy_provider.iterate_proxies(
             reason=reason,
@@ -735,7 +736,7 @@ class Judge:
         self,
         proxy_provider: ProxyProvider,
         proxy: Proxy,
-        curr_ip: str
+        curr_ips: set[str]
     ) -> typing.Literal["elite", "anonymous", "transparent"] | None:
         logger = logging.getLogger(__class__.__name__).getChild(self.url)
         # elite: server does not know that it is a proxy
@@ -751,7 +752,7 @@ class Judge:
                     proxy_auth=(proxy.auth.login, proxy.auth.password) if proxy.auth is not None else None,
                     verify=False,
                     timeout=5,
-                    auth=("HELLO", "HELLO_PASSWORD")
+                    # auth=("HELLO", "HELLO_PASSWORD")
                 )
                 break
             except curl_cffi.requests.exceptions.Timeout:
@@ -785,7 +786,7 @@ class Judge:
                 elite = False
                 break
 
-        if curr_ip in text:
+        if any(ip in text for ip in curr_ips):
             anonymous = elite = False
 
         if elite:
@@ -806,7 +807,7 @@ class JudgeManager:
     judges: list[Judge]
     lock: threading.Lock
     curr_judge_i: int = 0
-    curr_ip: str = None
+    curr_ips: set[str] = None
 
     def create_judges(self):
         logger = logging.getLogger(__class__.__name__)
@@ -838,11 +839,10 @@ class JudgeManager:
 
                 if not ip_addrs:
                     logger.critical("No IP address resolvers returned a valid IP address.")
-                    self.curr_ip = ""
+                    self.curr_ips = set()
                 else:
-                    ip_addrs = collections.Counter(ip_addrs)
-                    self.curr_ip = ip_addrs.most_common(1)[0][0]
-                    logger.info(f"IP address: {self.curr_ip}")
+                    self.curr_ips = set(ip_addrs)
+                    logger.info(f"IP addresses: {self.curr_ips}")
 
             self.judges = new_judges
 
@@ -866,4 +866,4 @@ class JudgeManager:
             self.curr_judge_i += 1
             self.curr_judge_i %= len(self.judges)
 
-        return judge.judge(proxy_provider, proxy, self.curr_ip)
+        return judge.judge(proxy_provider, proxy, self.curr_ips)
