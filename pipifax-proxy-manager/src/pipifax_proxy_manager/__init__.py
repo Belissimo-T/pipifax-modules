@@ -164,7 +164,7 @@ class ProxyProvider:
 
         self.do_rechoose_shard = False
         self.executor = concurrent.futures.ThreadPoolExecutor()
-        self.rejudge_executor = concurrent.futures.ThreadPoolExecutor(max_workers=100)
+        self.rejudge_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
         self._store_lock = threading.Lock()
         self._proxies_lock = threading.Lock()
@@ -282,7 +282,8 @@ class ProxyProvider:
 
         i = 0
         for p in self._iterate_proxies(reason, rotation_rate, blocked_grace, anonymity_level):
-            self._logger.debug(
+            self._logger.log(
+                logging.DEBUG - 2,
                 "* Yielding proxy. "
                 "Score: %.2f | %.2f | %.2f . "
                 "Tries: %d. "
@@ -345,7 +346,7 @@ class ProxyProvider:
 
         :param n: Number of times to yield any proxy.
         """
-
+        t0 = time.perf_counter()
         assert not (reason is not None is blocked_grace)
 
         for shard in self.shards.copy():
@@ -355,15 +356,19 @@ class ProxyProvider:
             proxies_n: dict[tuple[str, str, int], int] = collections.defaultdict(int)
             while proxies:
                 try:
-                    t1 = time.perf_counter()
-                    choices = random.choices(
-                        population=list(proxies.items()),
-                        weights=[self._get_proxy_effective_score(p) ** self.score_random_choice_exponent for p in
-                                 proxies.values()],
-                        # cum_weights=cum_weights,
-                        k=5
-                    )
-                    t2 = time.perf_counter()
+                    if self.do_rechoose_shard:
+                        choices = list(proxies.items())
+                        # random.shuffle(choices)
+                    else:
+                        t1 = time.perf_counter()
+                        choices = random.choices(
+                            population=list(proxies.items()),
+                            weights=[self._get_proxy_effective_score(p) ** self.score_random_choice_exponent for p in
+                                     proxies.values()],
+                            # cum_weights=cum_weights,
+                            k=5
+                        )
+                        t2 = time.perf_counter()
                     # self._logger.debug(f"Random choice took %.2fms.", (t2 - t1) * 1000)
                     proxy_data: ProxyData
                 except ValueError:
@@ -380,6 +385,9 @@ class ProxyProvider:
                         proxy_data._last_yielded is not None
                         and (now - proxy_data._last_yielded).total_seconds() < self.min_yield_delay
                     ):
+                        continue
+
+                    if self.do_rechoose_shard and proxy_data.tries >= self.scoring_min_tries:
                         continue
 
                     proxy_data._last_yielded = now
@@ -415,6 +423,9 @@ class ProxyProvider:
                         del proxies[p_addr]
                         break
 
+                    _dt = time.perf_counter() - t0
+                    self._logger.log(logging.DEBUG - 3, "Proxy Yield took %.2fms. %s", _dt * 1000, self.do_rechoose_shard)
+
                     yield proxy_data.to_proxy(*p_addr)
 
                     if self.do_rechoose_shard:
@@ -431,28 +442,29 @@ class ProxyProvider:
         return wrapper
 
     def _update_save(self):
-        # t1 = time.perf_counter()
+        t1 = time.perf_counter()
+
+        now = datetime.datetime.now()
         with self._update_save_lock:
             self._i = i = self._i + 1
 
-            if i % self.save_interval == 0:
-                self.executor.submit(self._log_error(self.store_proxies))
+            if i % 20 == 0:
+                if (now - self._last_fetched).total_seconds() > self.fetch_interval:
+                    self._last_fetched = now
+                    self.executor.submit(self._log_error(self.fetch_proxies))
 
-            if i % self.shard_interval == 0:
-                self._shard()
+                if (now - self._last_rejudge_checked).total_seconds() > self.rejudge_interval / 2:
+                    self._last_rejudge_checked = now
+                    self.executor.submit(self._log_error(self.rejudge_proxies))
 
-            now = datetime.datetime.now()
+        if i % self.save_interval == 0:
+            self.executor.submit(self._log_error(self.store_proxies))
 
-            if (now - self._last_fetched).total_seconds() > self.fetch_interval:
-                self._last_fetched = now
-                self.executor.submit(self._log_error(self.fetch_proxies))
+        if i % self.shard_interval == 0:
+            self._shard()
 
-            if (now - self._last_rejudge_checked).total_seconds() > self.rejudge_interval / 2:
-                self._last_rejudge_checked = now
-                self.executor.submit(self._log_error(self.rejudge_proxies))
-
-        # t2 = time.perf_counter()
-        # self._logger.debug(f"Update save took %.2fms.", (t2 - t1) * 1000)
+        t2 = time.perf_counter()
+        self._logger.log(logging.DEBUG - 3, f"Update save took %.2fms.", (t2 - t1) * 1000)
 
     def _rejudge(self, p_addr, proxy_data: ProxyData):
         proxy = proxy_data.to_proxy(*p_addr)
@@ -575,23 +587,19 @@ class ProxiedSession:
 
     def request[T](
         self,
-        method: str,
-        url: str,
-        handler: typing.Callable[[concurrent.futures.Future[curl_cffi.requests.Response], Proxy], T],
+        curl_kwargs: dict[str, typing.Any],
+        handler: typing.Callable[[concurrent.futures.Future[curl_cffi.requests.Response], Proxy, int], T],
         anonymity_level: typing.Literal["elite", "anonymous"] | None = None,
-        params: dict[str, str] | None = None,
-        headers: dict[str, str] | None = None,
         preferred_proxy: Proxy | None = None,
         rotation_rate: float | None = None,
         blocked_grace: float | None = 60 * 5,
     ) -> T:
-        headers = {} if headers is None else headers
-
+        curl_kwargs = dict(timeout=5) | curl_kwargs
         t0 = time.perf_counter()
 
         preferred_proxy_it = itertools.repeat(preferred_proxy, 3) if preferred_proxy is not None else []
 
-        endpoint = urllib3.util.url.parse_url(url)
+        endpoint = urllib3.util.url.parse_url(curl_kwargs["url"])
         reason = f"{endpoint.scheme}://{endpoint.netloc}{endpoint.path or ''}"
 
         proxy_it = self.proxy_provider.iterate_proxies(
@@ -604,32 +612,21 @@ class ProxiedSession:
         for _proxy_i, proxy in enumerate(itertools.chain(preferred_proxy_it, proxy_it)):
             fut = concurrent.futures.Future()
             try:
-                # if self.randomize_user_agent and "headers" not in request_kwargs:
-                #     request_kwargs["headers"] |= ua_generator.generate(
-                #         device="desktop",
-                #         options=ua_generator.options.Options(weighted_versions=True)
-                #     ).headers.get()
-
                 t1 = time.perf_counter()
 
                 with proxy:
                     # noinspection PyTypeChecker
                     fut.set_result(
                         curl_cffi.requests.request(
-                            method=method.upper(),
-                            url=url,
-                            impersonate="chrome",
                             proxy=proxy.to_str_no_auth(),
                             proxy_auth=(proxy.auth.login, proxy.auth.password) if proxy.auth is not None else None,
                             verify=not self.ignore_ssl,
-                            timeout=3,
-                            headers=headers,
-                            params=params
+                            **curl_kwargs,
                         )
                     )
 
                 total = time.perf_counter() - t1
-                if total > 3:
+                if total > curl_kwargs["timeout"] + 1:
                     logging.getLogger(self.__class__.__name__).warning(f"Request took {total:.2f}s.")
             except curl_cffi.requests.exceptions.Timeout:
                 self.proxy_provider.proxy_feedback(proxy, False, False, reason)
@@ -646,16 +643,14 @@ class ProxiedSession:
             except curl_cffi.requests.exceptions.IncompleteRead:
                 self.proxy_provider.proxy_feedback(proxy, False, False, reason)
                 continue
-
             except Exception as e:
-                continue
-                pass
+                fut.set_exception(e)
 
             if not fut.done():
                 raise AssertionError("Future not done.")
 
             try:
-                out = handler(fut, proxy)
+                out = handler(fut, proxy, _proxy_i)
             except ProxyBrokenError:
                 self.proxy_provider.proxy_feedback(proxy, False, False, reason)
                 continue
@@ -668,8 +663,11 @@ class ProxiedSession:
                 raise
             else:
                 self.proxy_provider.proxy_feedback(proxy, True, False, reason)
-                logging.getLogger(self.__class__.__name__).debug("Request took %s proxy tries and %.3f s.",
-                                                                 _proxy_i + 1, time.perf_counter() - t0)
+                logging.getLogger(self.__class__.__name__).log(
+                    logging.DEBUG - 1,
+                    "Request took %s proxy tries and %.3f s.",
+                    _proxy_i + 1, time.perf_counter() - t0
+                )
                 return out
 
     def __enter__(self):
@@ -727,7 +725,8 @@ class Judge:
             url=url,
             no_proxy_response={
                 "via": text.count("via"),
-                "x-forwarded-for": text.count("x-forwarded-for"),
+                # "x-forwarded-for": text.count("x-forwarded-for"),
+                "forwarded": text.count("forwarded"),
                 "proxy": text.count("proxy"),
             }
         )
@@ -738,11 +737,11 @@ class Judge:
         proxy: Proxy,
         curr_ip: str
     ) -> typing.Literal["elite", "anonymous", "transparent"] | None:
-        logger = logging.getLogger(__class__.__name__ + "[" + self.url + "]")
+        logger = logging.getLogger(__class__.__name__).getChild(self.url)
         # elite: server does not know that it is a proxy
         # anonymous: server knows that it is a proxy, but does not know the IP
         # transparent: server knows that it is a proxy and the IP
-        logger.info(f"Judging proxy {proxy.to_str()}...")
+        logger.log(logging.DEBUG - 1, f"Judging proxy {proxy.to_str()}...")
         for _ in range(3):
             try:
                 response = curl_cffi.requests.get(
@@ -768,7 +767,7 @@ class Judge:
             except Exception as e:
                 logger.error("An exception occurred while judging.", exc_info=True)
         else:
-            logger.info("Failed.")
+            # logger.deb("Failed.")
             return None
 
         proxy_provider.proxy_feedback(proxy, True, False, self.url)
@@ -790,13 +789,13 @@ class Judge:
             anonymous = elite = False
 
         if elite:
-            logger.info("Proxy is elite.")
+            # logger.info("Proxy is elite.")
             return "elite"
         elif anonymous:
-            logger.info("Proxy is anonymous.")
+            # logger.info("Proxy is anonymous.")
             return "anonymous"
         else:
-            logger.info("Proxy is transparent.")
+            # logger.info("Proxy is transparent.")
             return "transparent"
 
 
