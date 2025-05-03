@@ -4,15 +4,17 @@ save_interval = 500  # updates
 fetch_interval = 10_000  # s
 shard_interval = 200  # updates
 shard_threshold = 0.10
-shard_length = 50
+shard_length = 200
+shard_choices = 5
 scoring_min_tries = 5
 scoring_untested_score = 1
 score_random_choice_exponent = 10
-rejudge_interval = 2_160 # 6 hours
-min_yield_delay = 0.5  # s
+rejudge_interval = 21_600 # 6 hours
+rejudge_workers = 1000
+min_yield_delay = 5  # s
 
 [proxy-provider]
-cache_file = "proxies9.json"
+cache_file = "proxies.json"
 fetcher_sites_json = "sites.json"
 judges_json = "judges.json"
 ip_resolvers_json = "ip_resolvers.json"

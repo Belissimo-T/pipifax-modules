@@ -2,6 +2,7 @@ import abc
 import base64
 import collections
 import concurrent.futures
+import contextlib
 import dataclasses
 import datetime
 import functools
@@ -60,8 +61,7 @@ class ProxyData(pipifax_io.serializable.SimpleSerializable):
     last_judged: datetime.datetime = datetime.datetime.min
     anonymity_level: str | None = None
 
-    _last_yielded: datetime.datetime | None = None
-    _currently_in_use: bool = False
+    _last_yielded: float | None = None
 
     def to_proxy(self, scheme: str, url: str, port: int) -> "Proxy":
         return Proxy(scheme, url, port, self.auth, _proxy_data=self)
@@ -100,11 +100,10 @@ class Proxy:
         return cls(url.scheme, url.host, url.port, auth)
 
     def __enter__(self):
-        self._proxy_data._currently_in_use = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._proxy_data._currently_in_use = False
+        self._last_yielded = None
 
 
 @dataclasses.dataclass
@@ -134,6 +133,10 @@ class ProxyFetcher(abc.ABC):
         return self.__class__.__name__
 
 
+class _BreakException(Exception):
+    pass
+
+
 class ProxyProvider:
     def __init__(self, cache_file: pathlib.Path):
         self._logger = logging.getLogger(self.__class__.__name__)
@@ -158,13 +161,15 @@ class ProxyProvider:
         self.shard_interval = 200
         self.shard_threshold = 0.10
         self.shard_length = 200
+        self.shard_choices = 5
         self.scoring_min_tries = 3
         self.scoring_untested_score = 1
         self.min_yield_delay = 0.5
 
         self.do_rechoose_shard = False
         self.executor = concurrent.futures.ThreadPoolExecutor()
-        self.rejudge_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+        self.rejudge_workers = 5
+        self.rejudge_executor = None
 
         self._store_lock = threading.Lock()
         self._proxies_lock = threading.Lock()
@@ -176,6 +181,7 @@ class ProxyProvider:
         self._i = 0
 
     def init(self):
+        self.rejudge_executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.rejudge_workers)
         self.load_proxies()
         self._shard()
         self._update_save()
@@ -303,11 +309,17 @@ class ProxyProvider:
 
     def _shard(self):
         self._logger.info(" * Sharding proxies.")
-        self.shards = [Proxies()]
+        new_shards = [Proxies() for _ in range(len(self.proxies.proxies) // self.shard_length + 1)]
+        shard_i = 0
         n_proxies_untested = 0
 
-        for i, (key, val) in enumerate(
-            sorted(self.proxies.proxies.items(), key=lambda x: self._get_proxy_effective_score(x[1]), reverse=True)):
+        sorted_proxies = sorted(
+            self.proxies.proxies.items(),
+            key=lambda x: self._get_proxy_effective_score(x[1]),
+            reverse=True
+        )
+
+        for i, (key, val) in enumerate(sorted_proxies):
             if self._get_proxy_effective_score(val) < self.shard_threshold:
                 self._logger.debug(" => Stopping sharding at %s.", i + 1)
                 break
@@ -315,60 +327,50 @@ class ProxyProvider:
             if val.tries < 3:
                 n_proxies_untested += 1
 
-            self.shards[-1].proxies[key] = val
+            new_shards[shard_i].proxies[key] = val
 
-            if len(self.shards[-1].proxies) >= self.shard_length:
-                self.shards.append(Proxies())
+            shard_i += 1
+            shard_i %= len(new_shards)
 
-        self.do_rechoose_shard = n_proxies_untested > self.shard_length * 2
+        self.shards = new_shards
+        # self.do_rechoose_shard = n_proxies_untested > self.shard_length / 2
 
-        self._logger.info(" => Sharded into %d shards.", len(self.shards))
+        self._logger.info(" => Sharded into %d shards.", len(new_shards))
 
     def _iterate_proxies(
         self,
-        reason: str | None = None,
-        rotation_rate: float | None = None,
-        blocked_grace: float | None = 60 * 5,
-        anonymity_level: typing.Literal["elite", "anonymous"] | None = None,
-    ) -> typing.Generator[Proxy, None, None]:
-        while True:
-            yield from self._iterate_proxies_scored(3, reason, rotation_rate, blocked_grace, anonymity_level)
-
-    def _iterate_proxies_scored(
-        self,
-        n: int,
         reason: str | None,
         rotation_rate: float | None,
         blocked_grace: float | None,
         anonymity_level: typing.Literal["elite", "anonymous"] | None = None,
     ):
-        """
-
-        :param n: Number of times to yield any proxy.
-        """
         t0 = time.perf_counter()
+
         assert not (reason is not None is blocked_grace)
 
-        for shard in self.shards.copy():
+        # tracks how many times a proxy was yielded
+        proxies_n: dict[tuple[str, str, int], int] = collections.defaultdict(int)
+
+        while True:
+            shard = random.choice(self.shards)
+
             proxies = shard.proxies.copy()
 
             # proxies, cum_weights = self._get_cached_cum_weights()
-            proxies_n: dict[tuple[str, str, int], int] = collections.defaultdict(int)
-            while proxies:
+            i = 0
+            while proxies and i < self.shard_choices:
                 try:
-                    if self.do_rechoose_shard:
-                        choices = list(proxies.items())
-                        # random.shuffle(choices)
-                    else:
-                        t1 = time.perf_counter()
-                        choices = random.choices(
-                            population=list(proxies.items()),
-                            weights=[self._get_proxy_effective_score(p) ** self.score_random_choice_exponent for p in
-                                     proxies.values()],
-                            # cum_weights=cum_weights,
-                            k=5
-                        )
-                        t2 = time.perf_counter()
+                    # if self.do_rechoose_shard:
+                    #     choices = list(proxies.items())
+                    # else:
+                    t1 = time.perf_counter()
+                    choices = random.choices(
+                        population=list(proxies.items()),
+                        weights=[self._get_proxy_effective_score(p) ** self.score_random_choice_exponent for p in
+                                 proxies.values()],
+                        k=self.shard_choices * 2
+                    )
+                    t2 = time.perf_counter()
                     # self._logger.debug(f"Random choice took %.2fms.", (t2 - t1) * 1000)
                     proxy_data: ProxyData
                 except ValueError:
@@ -376,60 +378,70 @@ class ProxyProvider:
                     break
 
                 for p_addr, proxy_data in choices:
-                    if proxy_data._currently_in_use:
-                        continue
-
+                    now_ts = time.time()
                     now = datetime.datetime.now()
-
-                    if (
-                        proxy_data._last_yielded is not None
-                        and (now - proxy_data._last_yielded).total_seconds() < self.min_yield_delay
-                    ):
-                        continue
-
-                    if self.do_rechoose_shard and proxy_data.tries >= self.scoring_min_tries:
-                        continue
-
-                    proxy_data._last_yielded = now
 
                     do_exclude_proxy = False
 
-                    do_exclude_proxy |= anonymity_level == "elite" and proxy_data.anonymity_level != "elite"
-                    do_exclude_proxy |= anonymity_level == "anonymous" and proxy_data.anonymity_level not in ("elite",
-                                                                                                              "anonymous")
+                    if (
+                        proxy_data._last_yielded is not None
+                        and (now_ts - proxy_data._last_yielded) < self.min_yield_delay
+                    ):
+                        continue
 
-                    proxies_n[p_addr] += 1
-                    do_exclude_proxy |= proxies_n[p_addr] >= n
+                    with contextlib.suppress(_BreakException):
+                        wrong_anonymity = (
+                            (anonymity_level == "elite" and proxy_data.anonymity_level != "elite")
+                            or (anonymity_level == "anonymous"
+                                and proxy_data.anonymity_level not in ("elite", "anonymous"))
+                        )
+                        if wrong_anonymity:
+                            do_exclude_proxy = True
+                            raise _BreakException
 
-                    needs_rotate = (
-                        rotation_rate is not None
-                        and (now - proxy_data.last_used.get(reason,
-                                                            datetime.datetime.min)).total_seconds() < rotation_rate
-                    )
-                    do_exclude_proxy |= needs_rotate
+                        if proxies_n[p_addr] >= 3:
+                            do_exclude_proxy = True
+                            raise _BreakException
 
-                    if reason is not None:
-                        try:
-                            last_blocked, tries = proxy_data.last_blocked[reason]
-                        except KeyError:
-                            pass
-                        else:
-                            if (
-                                tries >= self.blocked_tries
-                            ) and (datetime.datetime.now() - last_blocked).total_seconds() < blocked_grace:
-                                do_exclude_proxy = True
+                        needs_rotate = (
+                            rotation_rate is not None
+                            and (
+                                now - proxy_data.last_used.get(reason, datetime.datetime.min)
+                            ).total_seconds() < rotation_rate
+                        )
+                        if needs_rotate:
+                            do_exclude_proxy = True
+                            raise _BreakException
+
+                        if reason is not None:
+                            try:
+                                last_blocked, tries = proxy_data.last_blocked[reason]
+                            except KeyError:
+                                pass
+                            else:
+                                if (
+                                    tries >= self.blocked_tries
+                                ) and (now - last_blocked).total_seconds() < blocked_grace:
+                                    do_exclude_proxy = True
+                                    raise _BreakException
 
                     if do_exclude_proxy:
                         del proxies[p_addr]
                         break
 
+                    proxies_n[p_addr] += 1
+                    proxy_data._last_yielded = now_ts
+
                     _dt = time.perf_counter() - t0
-                    self._logger.log(logging.DEBUG - 3, "Proxy Yield took %.2fms. %s", _dt * 1000, self.do_rechoose_shard)
+                    self._logger.log(logging.DEBUG - 3, "Proxy Yield took %.2fms. %s", _dt * 1000,
+                                     self.do_rechoose_shard)
 
                     yield proxy_data.to_proxy(*p_addr)
 
-                    if self.do_rechoose_shard:
-                        return
+                    # if self.do_rechoose_shard:
+                    #     return
+
+                i += 1
 
     def _log_error(self, func):
         @functools.wraps(func)
@@ -699,7 +711,7 @@ class Judge:
         try:
             response = curl_cffi.requests.get(
                 url,
-                impersonate="chrome",
+                # impersonate="chrome",
                 timeout=5,
                 headers={
                     "Authorization": basic_auth,
