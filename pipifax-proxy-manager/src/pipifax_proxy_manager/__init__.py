@@ -175,6 +175,8 @@ class ProxyProvider:
         self._proxies_lock = threading.Lock()
         self._update_save_lock = threading.Lock()
         self._rejudge_lock = threading.Lock()
+        self._shard_lock = threading.Lock()
+        self._fetch_lock = threading.Lock()
 
         # TODO: auto delete service entries
 
@@ -230,48 +232,57 @@ class ProxyProvider:
             self._update_save()
 
     def fetch_proxies(self):
-        self._logger.info(f"* Fetching proxies")
-        tot = 0
-        tot_new = 0
-        errs = 0
+        a = self._fetch_lock.acquire(blocking=False)
+        if not a:
+            self._logger.warning("Fetch lock already acquired. Skipping fetching. (%s)", self._i)
+            return
 
-        for proxy_fetcher in self.proxy_fetchers:
-            self._logger.info(f"=> {proxy_fetcher.get_name()!r}...")
-            try:
-                # TODO give self to proxy fetcher?
-                _proxies = proxy_fetcher.fetch_proxies(None)
-            except Exception as e:
-                self._logger.error("=> Error fetching proxies.", exc_info=True)
-                errs += 1
-                continue
-            else:
-                tot += len(_proxies)
+        try:
 
-                if not _proxies:
-                    self._logger.info(f"=> {proxy_fetcher.get_name()!r} returned no proxies.")
+            self._logger.info("* Fetching proxies. (%s)", self._i)
+            tot = 0
+            tot_new = 0
+            errs = 0
+
+            for proxy_fetcher in self.proxy_fetchers:
+                self._logger.info(f"=> {proxy_fetcher.get_name()!r}...")
+                try:
+                    # TODO give self to proxy fetcher?
+                    _proxies = proxy_fetcher.fetch_proxies(None)
+                except Exception as e:
+                    self._logger.error("=> Error fetching proxies.", exc_info=True)
+                    errs += 1
                     continue
+                else:
+                    tot += len(_proxies)
 
-                f_new = 0
-
-                for proxy in _proxies:
-                    if self.contains_proxy(proxy):
+                    if not _proxies:
+                        self._logger.info(f"=> {proxy_fetcher.get_name()!r} returned no proxies.")
                         continue
 
-                    if proxy.scheme not in ("https", "socks4", "socks5"):
-                        self._logger.debug(f" => Proxy {proxy.to_str()} has invalid scheme.")
-                        continue
+                    f_new = 0
 
-                    self.add_proxy(proxy, _no_save=True)
+                    for proxy in _proxies:
+                        if self.contains_proxy(proxy):
+                            continue
 
-                    f_new += 1
+                        if proxy.scheme not in ("https", "socks4", "socks5"):
+                            self._logger.debug(f" => Proxy {proxy.to_str()} has invalid scheme.")
+                            continue
 
-                self._logger.info(f" -> Got {f_new} / {len(_proxies)} = {f_new / len(_proxies):.2%} new proxies.")
+                        self.add_proxy(proxy, _no_save=True)
 
-                tot_new += f_new
+                        f_new += 1
 
-        self._logger.info(f"=> Fetched {tot} proxies. {tot_new} new. {errs} errors.")
+                    self._logger.info(f" -> Got {f_new} / {len(_proxies)} = {f_new / len(_proxies):.2%} new proxies.")
 
-        self.store_proxies()
+                    tot_new += f_new
+
+            self._logger.info(f"=> Fetched {tot} proxies. {tot_new} new. {errs} errors.")
+
+            self.store_proxies()
+        finally:
+            self._fetch_lock.release()
 
     def iterate_proxies(
         self,
@@ -308,34 +319,42 @@ class ProxyProvider:
                 self._logger.warning(f"Yielded %s proxies.", i)
 
     def _shard(self):
-        self._logger.info(" * Sharding proxies.")
-        new_shards = [Proxies() for _ in range(len(self.proxies.proxies) // self.shard_length + 1)]
-        shard_i = 0
-        n_proxies_untested = 0
+        a = self._shard_lock.acquire(blocking=False)
+        if not a:
+            self._logger.warning("Shard lock already acquired. Skipping sharding.")
+            return
 
-        sorted_proxies = sorted(
-            self.proxies.proxies.items(),
-            key=lambda x: self._get_proxy_effective_score(x[1]),
-            reverse=True
-        )
+        try:
+            self._logger.debug(" * Sharding proxies. (%s)", self._i)
+            new_shards = [Proxies() for _ in range(len(self.proxies.proxies) // self.shard_length + 1)]
+            shard_i = 0
+            n_proxies_untested = 0
 
-        for i, (key, val) in enumerate(sorted_proxies):
-            if self._get_proxy_effective_score(val) < self.shard_threshold:
-                self._logger.debug(" => Stopping sharding at %s.", i + 1)
-                break
+            sorted_proxies = sorted(
+                self.proxies.proxies.items(),
+                key=lambda x: self._get_proxy_effective_score(x[1]),
+                reverse=True
+            )
 
-            if val.tries < 3:
-                n_proxies_untested += 1
+            for i, (key, val) in enumerate(sorted_proxies):
+                if self._get_proxy_effective_score(val) < self.shard_threshold:
+                    self._logger.debug(" => Stopping sharding at %s.", i + 1)
+                    break
 
-            new_shards[shard_i].proxies[key] = val
+                if val.tries < 3:
+                    n_proxies_untested += 1
 
-            shard_i += 1
-            shard_i %= len(new_shards)
+                new_shards[shard_i].proxies[key] = val
 
-        self.shards = new_shards
-        # self.do_rechoose_shard = n_proxies_untested > self.shard_length / 2
+                shard_i += 1
+                shard_i %= len(new_shards)
 
-        self._logger.info(" => Sharded into %d shards.", len(new_shards))
+            self.shards = new_shards
+            # self.do_rechoose_shard = n_proxies_untested > self.shard_length / 2
+
+            self._logger.debug(" => Sharded into %d shards.", len(new_shards))
+        finally:
+            self._shard_lock.release()
 
     def _iterate_proxies(
         self,
@@ -487,7 +506,7 @@ class ProxyProvider:
     def rejudge_proxies(self):
         a = self._rejudge_lock.acquire(blocking=False)
         if not a:
-            self._logger.warning("Rejudge lock already acquired. Skipping rejudging.")
+            self._logger.warning("Rejudge lock already acquired. Skipping rejudging. (%s)", self._i)
             return
 
         try:
