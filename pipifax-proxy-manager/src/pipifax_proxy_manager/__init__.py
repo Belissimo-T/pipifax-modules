@@ -499,7 +499,7 @@ class ProxyProvider:
 
     def _rejudge(self, p_addr, proxy_data: ProxyData):
         proxy = proxy_data.to_proxy(*p_addr)
-        status = self.judge_mgr.judge(self, proxy)
+        status = self.judge_mgr.judge(self, proxy, self.scoring_min_tries)
         proxy_data.anonymity_level = status
         proxy_data.last_judged = datetime.datetime.now()
 
@@ -767,14 +767,15 @@ class Judge:
         self,
         proxy_provider: ProxyProvider,
         proxy: Proxy,
-        curr_ips: set[str]
+        curr_ips: set[str],
+        n_tries: int = 3,
     ) -> typing.Literal["elite", "anonymous", "transparent"] | None:
         logger = logging.getLogger(__class__.__name__).getChild(self.url)
         # elite: server does not know that it is a proxy
         # anonymous: server knows that it is a proxy, but does not know the IP
         # transparent: server knows that it is a proxy and the IP
         logger.log(logging.DEBUG - 1, f"Judging proxy {proxy.to_str()}...")
-        for _ in range(3):
+        for _ in range(n_tries):
             try:
                 response = curl_cffi.requests.get(
                     url=self.url,
@@ -796,7 +797,11 @@ class Judge:
                 proxy_provider.proxy_feedback(proxy, False, False, self.url)
             except curl_cffi.requests.exceptions.IncompleteRead:
                 proxy_provider.proxy_feedback(proxy, False, False, self.url)
-            except Exception as e:
+            except curl_cffi.requests.exceptions.RequestException:
+                proxy_provider.proxy_feedback(proxy, False, False, self.url)
+                logger.debug(logging.DEBUG - 1, "An exception occurred while judging.", exc_info=True)
+            except Exception:
+                proxy_provider.proxy_feedback(proxy, False, False, self.url)
                 logger.error("An exception occurred while judging.", exc_info=True)
         else:
             # logger.deb("Failed.")
@@ -889,7 +894,8 @@ class JudgeManager:
     def judge(
         self,
         proxy_provider: ProxyProvider,
-        proxy: Proxy
+        proxy: Proxy,
+        n_tries: int = 3,
     ) -> typing.Literal["elite", "anonymous", "transparent"] | None:
         with self.lock:
             judge = self.judges[self.curr_judge_i]
@@ -897,4 +903,4 @@ class JudgeManager:
             self.curr_judge_i += 1
             self.curr_judge_i %= len(self.judges)
 
-        return judge.judge(proxy_provider, proxy, self.curr_ips)
+        return judge.judge(proxy_provider, proxy, self.curr_ips, n_tries)

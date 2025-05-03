@@ -1,12 +1,12 @@
 [proxy-provider.attrs]
 blocked_tries = 8
-save_interval = 500  # updates
-fetch_interval = 10_000  # s
+save_interval = 400  # updates
+fetch_interval = 86_400  # 24 hours
 shard_interval = 200  # updates
 shard_threshold = 0.10
 shard_length = 200
 shard_choices = 5
-scoring_min_tries = 5
+scoring_min_tries = 4
 scoring_untested_score = 1
 score_random_choice_exponent = 10
 rejudge_interval = 21_600 # 6 hours
