@@ -44,7 +44,7 @@ class HasJsonSerializationCodegen(typing.Protocol):
         out_var: str,
         codegen: code_generator.CodeGenerator
     ) -> None:
-        ...
+        raise NotImplementedError
 
     @classmethod
     def _compile_json_deserializer(
@@ -53,7 +53,7 @@ class HasJsonSerializationCodegen(typing.Protocol):
         out_var: str,
         codegen: code_generator.CodeGenerator
     ) -> None:
-        ...
+        raise NotImplementedError
 
 
 class HasJsonSerializationCodegenSerializableMixin:
@@ -161,10 +161,10 @@ class JsonSerializerCodegen(type_serializer.SerializerCodegen):
     def scalar(self, type_: type_serializer.TypeHint, in_var: str, out_var: str):
         self.codegen.assign(out_var, in_var)
 
-    def tuple_(self, in_vars: list[str], out_var: str):
+    def tuple_(self, _, in_vars: list[str], out_var: str):
         self.codegen.assign(out_var, f"({', '.join(in_vars)},)")
 
-    def mapping(self, key_type: type_serializer.TypeHint, value_type: type_serializer.TypeHint, in_var: str,
+    def mapping(self, base_type, key_type: type_serializer.TypeHint, value_type: type_serializer.TypeHint, in_var: str,
                 out_var: str):
         base_class, _ = type_serializer.read_type_hint(key_type)
         if isinstance(base_class, type) and issubclass(base_class, str):
@@ -177,9 +177,10 @@ class JsonSerializerCodegen(type_serializer.SerializerCodegen):
             self.codegen.assign(f"{out_var}[{key_var}]", value_var)
             self.codegen.dedent()
         else:
-            super().mapping(key_type, value_type, in_var, out_var)
+            super().mapping(base_type, key_type, value_type, in_var, out_var)
 
     def union(self, args: tuple[type_serializer.TypeHint, ...], in_var: str, out_var: str):
+        # TODO for all scaler types, not just None?
         if types.NoneType in args:
             self.codegen.literal(f"if {in_var} is not None:")
             self.codegen.indent()
@@ -226,6 +227,9 @@ def _issubclass_json_decode_type(tp) -> bool:
       - list[<valid>]
       - dict[str, <valid>]
     """
+    if tp is JsonType:
+        return True
+
     origin, args = type_serializer.read_type_hint(tp)
 
     # Handle unions (both typing.Union[...] and X|Y)
@@ -387,7 +391,7 @@ def main():
         out_var="out_var",
     )
 
-    print(codegen.to_str())
+    print(*codegen.to_str())
     print(codegen.consts)
     asd = codegen.compile("ASD", "in_var", "out_var")
     print(asd({2: "Hello"}))
@@ -404,12 +408,12 @@ def main():
         out_var="out_var",
     )
 
-    print(codegen.to_str())
+    print(*codegen.to_str())
     print(codegen.consts)
     asd = codegen.compile("ASD", "in_var", "out_var")
-    print(asd((0, [(2, 'Hello')])))
+    print(asd(("dict", [(2, 'Hello')])))
     print(asd(None))
-    print(asd((1, 'SEVMTE9X')))
+    print(asd(("bytes", 'SEVMTE9X')))
 
 
 if __name__ == "__main__":

@@ -76,6 +76,8 @@ class Serializable(typing.Protocol):
 
 
 class SimpleSerializable(json_serialization.HasJsonSerializationCodegenSerializableMixin):
+    __simple_serializable_include_field_names__: typing.ClassVar[bool] = True
+
     def __deserialize_init__(self):
         pass
 
@@ -120,13 +122,22 @@ class SimpleSerializable(json_serialization.HasJsonSerializationCodegenSerializa
 
             serializer.any(field_type, tmp, tmp)
 
-        serializer.codegen.assign(out_var, "{" + ", ".join([f"{name!r}: {v}" for name, v in out]) + "}")
+        if cls.__simple_serializable_include_field_names__:
+            serializer.codegen.assign(out_var, "{" + ", ".join([f"{name!r}: {v}" for name, v in out]) + "}")
 
-        serializer.any(
-            dict[str, json_serialization.JsonType],
-            in_var=out_var,
-            out_var=out_var,
-        )
+            serializer.any(
+                dict[str, json_serialization.JsonType],
+                in_var=out_var,
+                out_var=out_var,
+            )
+        else:
+            serializer.codegen.assign(out_var, "(" + ", ".join(v for name, v in out) + ",)")
+
+            serializer.any(
+                tuple[*([json_serialization.JsonType] * len(out))],
+                in_var=out_var,
+                out_var=out_var,
+            )
 
     @classmethod
     def _compile_json_deserializer(
@@ -142,9 +153,12 @@ class SimpleSerializable(json_serialization.HasJsonSerializationCodegenSerializa
         tmp = deserializer.codegen.get_var()
         deserializer.codegen.assign(tmp, f"{cls_var}.__new__({cls_var})")
 
-        for field_name, field_type in fields.items():
+        for i, (field_name, field_type) in enumerate(fields.items()):
             tmp2 = deserializer.codegen.get_var()
-            deserializer.any(field_type, f"{in_var}[{field_name!r}]", tmp2)
+            if cls.__simple_serializable_include_field_names__:
+                deserializer.any(field_type, f"{in_var}[{field_name!r}]", tmp2)
+            else:
+                deserializer.any(field_type, f"{in_var}[{i}]", tmp2)
 
             deserializer.codegen.literal(f"object.__setattr__({tmp}, {field_name!r}, {tmp2})")
 

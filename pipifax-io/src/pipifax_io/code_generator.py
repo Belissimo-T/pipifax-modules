@@ -28,42 +28,52 @@ class _TracebackSourceContextManager:
     name: str
 
     def __enter__(self):
-        import linecache
-
-        linecache.cache[self.name] = (
-            len(self.src),
-            None,
-            [line + '\n' for line in self.src.splitlines()],
-            self.name
-        )
+        # import linecache
+        # 
+        # linecache.cache[self.name] = (
+        #     len(self.src),
+        #     None,
+        #     [line + '\n' for line in self.src.splitlines()],
+        #     self.name
+        # )
         # print(linecache.cache)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is None:
-            from linecache import cache
-
-            del cache[self.name]
-
-            return False
-        else:
+        if exc_type is not None:
             lines = self.src.splitlines()
 
-            if exc_tb.tb_next is not None:
-                exc_val.add_note(
-                    "Exception occurred in dynamically generated code:\n"
-                    f"{lines[exc_tb.tb_next.tb_lineno - 1]}\n\n"
-                    f"Full source:\n{self.src}"
-                )
-        return False
+            exc_val.add_note(
+                "Exception occurred in dynamically generated code.\n"
+                # f"{lines[exc_tb.tb_next.tb_lineno - 1]}\n\n"
+                f"Full source:\n{self.src}"
+            )
+            return False
 
 
 @dataclasses.dataclass
 class CodeGenerator:
-    statements: list[tuple[int, Statement]] = dataclasses.field(default_factory=list)
-    current_indent: int = 0
+    functions: dict[str, tuple[list[tuple[int, Statement]], int]] = dataclasses.field(
+        default_factory=lambda: {None: ([], 0)})
+    current_function_stack: list[str] = dataclasses.field(default_factory=lambda: [None])
     consts: dict[str, typing.Any] = dataclasses.field(default_factory=dict)
     var_i: int = 0
+
+    @property
+    def current_function(self) -> str:
+        return self.current_function_stack[-1]
+
+    @property
+    def current_indent(self):
+        return self.functions[self.current_function][1]
+
+    @current_indent.setter
+    def current_indent(self, value: int):
+        self.functions[self.current_function] = (self.functions[self.current_function][0], value)
+
+    @property
+    def current_statements(self) -> list[tuple[int, Statement]]:
+        return self.functions[self.current_function][0]
 
     def get_var(self) -> str:
         try:
@@ -89,8 +99,20 @@ class CodeGenerator:
         self.literal("...")
         self.current_indent -= 1
 
+    def begin_toplevel_function(self, name: str, args: list[str]):
+        self.current_function_stack.append(name)
+        self.functions[name] = ([], 0)
+        self.literal(f"def {name}({', '.join(args)}):")
+        self.indent()
+
+    def end_toplevel_function(self, return_var: str | None):
+        if return_var is not None:
+            self.literal(f"return {return_var}")
+
+        self.current_function_stack.pop()
+
     def add_statement(self, statement: Statement):
-        self.statements.append((self.current_indent, statement))
+        self.current_statements.append((self.current_indent, statement))
 
     def assign(self, left: str, right: str):
         if left == right:
@@ -117,36 +139,70 @@ class CodeGenerator:
                 LiteralStatement("# " + statement)
             )
 
-    def blocks(self) -> list[tuple[int, list[Statement]]]:
-        blocks = []
-        current_indent = None
+    # def blocks(self) -> list[tuple[int, list[Statement]]]:
+    #     blocks = []
+    #     current_indent = None
+    # 
+    #     for indent, statement in self.statements:
+    #         if indent != current_indent:
+    #             blocks.append((indent, []))
+    # 
+    #         blocks[-1][1].append(statement)
+    #         current_indent = indent
+    # 
+    #     return blocks
 
-        for indent, statement in self.statements:
-            if indent != current_indent:
-                blocks.append((indent, []))
+    # def optimize(self):
+    #     new_blocks = []
+    #
+    #     for indent, statements in self.blocks():
+    #         for statement in statements:
+    #
+    #             match statement:
+    #                 case AssignmentStatement(left=left, right=right):
+    #                     pass
 
-            blocks[-1][1].append(statement)
-            current_indent = indent
-
-        return blocks
-
-    def to_str(self):
+    def to_str(self) -> tuple[str, str]:
         lines = []
 
-        for indent, statement in self.statements:
-            lines.append("    " * indent + statement.to_str())
+        for name, (statements, _) in self.functions.items():
+            if name is None:
+                continue
 
-        return "\n".join(lines)
+            for indent, statement in statements:
+                lines.append("    " * indent + statement.to_str())
+
+            lines.append("")
+            lines.append("")
+
+        return (
+            "\n".join(lines),
+            "\n".join(
+                [
+                    "    " * indent + statement.to_str()
+
+                    for indent, statement in self.functions[None][0]
+                ]
+            )
+        )
 
     def compile(self, name: str, in_var: str = "inp", out_var: str = "out") -> typing.Callable:
-        src = self.to_str()
+        src_funcs, src_main = self.to_str()
 
-        code = compile(src, name, "exec", optimize=2)
+        # print(f"COMPILED {name}:\n{src}\n")
+
+        globals_ = self.consts.copy()
+
+        code_funcs = compile(src_funcs, name, "exec", optimize=2)
+        exec(code_funcs, globals_, globals_)
+
+        code_main = compile(src_main, name, "exec", optimize=2)
 
         def func(data):
-            with _TracebackSourceContextManager(src, name):
+            with _TracebackSourceContextManager(src_funcs + "\n\n" + src_main, name):
                 scope = {in_var: data}
-                exec(code, self.consts, scope)
+
+                exec(code_main, globals_, scope)
 
                 return scope[out_var]
 

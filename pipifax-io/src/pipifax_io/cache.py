@@ -8,6 +8,7 @@ import json
 import pathlib
 import types
 import typing
+import functools
 
 import bson
 
@@ -63,7 +64,7 @@ class FileSystemCache(SimpleCache):
         (self.file_path / key).unlink(missing_ok=True)
 
 
-def _decorator_can_take_noargs[** P, R](decorator: typing.Callable[P, R]) -> typing.Callable[P, R]:
+def _decorator_can_take_noargs[**P, R](decorator: typing.Callable[P, R]) -> typing.Callable[P, R]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         if len(args) == 1 and isinstance(args[0], types.FunctionType):
             return decorator()(args[0])
@@ -103,7 +104,7 @@ def make_key_func(
 
 
 @_decorator_can_take_noargs
-def cache[** P, R](
+def cache[**P, R](
     # self,
     serialize: typing.Callable[[R], bytes],
     deserialize: typing.Callable[[bytes], R],
@@ -165,13 +166,14 @@ def cache[** P, R](
 
 
 @_decorator_can_take_noargs
-def cache_auto[** P, R, S: JsonSerializableValue](
+def cache_auto[**P, R, S: JsonSerializableValue](
     serialize_type: type[S] | None = None,
     version=0,
     key_args: typing.Collection[str] | None = None,
     key_func: typing.Callable[[GetAttrDict], JsonSerializableValue] | None = None,
     serialize: typing.Callable[[R], S] | None = None,
     deserialize: typing.Callable[[S], R] | None = None,
+    file_extension: str | None = None,
 ) -> typing.Callable[[typing.Callable[P, R]], typing.Callable[P, R]]:
     assert not (key_args is not None is not key_func), "Specify either key_args or key_func."
 
@@ -221,6 +223,9 @@ def cache_auto[** P, R, S: JsonSerializableValue](
             )
             ext = ".json"
 
+        if file_extension is not None:
+            ext = file_extension
+
         key = make_key_func(
             key_args=key_args,
             version=version,
@@ -251,3 +256,15 @@ def set_simple_cache(simple_cache: SimpleCache):
         yield
     finally:
         CURRENT_SIMPLE_CACHE_CONTEXT_VAR.reset(token)
+
+
+def use_cache(simple_cache: SimpleCache):
+    def decorator[**P, R](func: typing.Callable[P, R]) -> typing.Callable[P, R]:
+        @functools.wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            with set_simple_cache(simple_cache):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
