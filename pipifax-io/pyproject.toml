@@ -1,6 +1,6 @@
 [project]
 name = "pipifax_io"
-version = "0.0.2"
+version = "0.0.3"
 requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -10,5 +10,7 @@ license = "GPL-3.0-or-later"
 license-files = ["LICEN[CS]E*"]
 dependencies = [
     "psutil",
-    "bson"
+    # bson is broken
+    # "bson"
+    "bson @ git+https://github.com/py-bson/bson.git"
 ]
